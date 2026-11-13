@@ -95,13 +95,15 @@ def render_risk_banner(risk_code, risk_label):
 apply_custom_css()
 
 # ---------------------------------------------------------
-# 2. Built-in Authentication & SQLite Database Engine
+# 2. Clean SQLite Database Engine (portal_v2.db)
 # ---------------------------------------------------------
+DB_FILE = "portal_v2.db"
+
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
 def init_db():
-    conn = sqlite3.connect("users.db")
+    conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -123,13 +125,6 @@ def init_db():
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # Upgrade schema safely if old table exists without 'course'
-    c.execute("PRAGMA table_info(prediction_history)")
-    cols = [col[1] for col in c.fetchall()]
-    if "course" not in cols:
-        c.execute("ALTER TABLE prediction_history ADD COLUMN course TEXT DEFAULT 'General Semester Evaluation'")
-
-    # Seed default demo accounts if not present
     c.execute("INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)",
               ("teacher", hash_password("password123"), "Teacher"))
     c.execute("INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)",
@@ -138,7 +133,7 @@ def init_db():
     conn.close()
 
 def register_user(username, password, role):
-    conn = sqlite3.connect("users.db")
+    conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     try:
         c.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
@@ -151,7 +146,7 @@ def register_user(username, password, role):
         conn.close()
 
 def login_user(username, password):
-    conn = sqlite3.connect("users.db")
+    conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT password, role FROM users WHERE username = ?", (username,))
     row = c.fetchone()
@@ -161,7 +156,7 @@ def login_user(username, password):
     return False, None
 
 def save_prediction_record(username, student_name, course, attendance, prev_cgpa, pred_cgpa, risk_label):
-    conn = sqlite3.connect("users.db")
+    conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("""
         INSERT INTO prediction_history (username, student_name, course, attendance, prev_cgpa, predicted_cgpa, risk_level)
@@ -230,7 +225,6 @@ def predict_and_explain(attendance, prev_cgpa, study_hours, social_media_hours, 
     risk_code = int(risk_model.predict(scaled_input)[0])
     risk_probs = risk_model.predict_proba(scaled_input)[0]
 
-    # Safeguard thresholds
     if pred_cgpa < 2.75 or attendance < 60.0:
         risk_code = 2
     elif (pred_cgpa < 3.25 or attendance < 75.0) and risk_code == 0:
@@ -490,7 +484,7 @@ if st.session_state["role"] == "Student":
 
     elif menu == "📜 My Evaluation History":
         render_header("📜 My Course Evaluation History", "Review your past predictions across different courses.")
-        conn = sqlite3.connect("users.db")
+        conn = sqlite3.connect(DB_FILE)
         hist_df = pd.read_sql_query(
             "SELECT student_name, course, attendance, prev_cgpa, predicted_cgpa, risk_level, timestamp FROM prediction_history WHERE username = ? ORDER BY id DESC",
             conn, params=(st.session_state["username"],)
@@ -632,7 +626,7 @@ else:
 
     elif menu == "📜 All Student Records":
         render_header("📜 Saved Course Evaluation Records", "All evaluations logged across students and courses.")
-        conn = sqlite3.connect("users.db")
+        conn = sqlite3.connect(DB_FILE)
         all_df = pd.read_sql_query("SELECT * FROM prediction_history ORDER BY id DESC", conn)
         conn.close()
         st.dataframe(all_df, use_container_width=True)
