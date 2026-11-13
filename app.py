@@ -4,13 +4,11 @@ import numpy as np
 import joblib
 import json
 import sqlite3
+import hashlib
 import plotly.express as px
-import plotly.graph_objects as go
-from auth import init_db, register_user, login_user
-from ui_components import apply_custom_css, render_header, render_metric_card, render_risk_banner
 
 # ---------------------------------------------------------
-# 1. Page Configuration & Initialization
+# 1. Page Configuration & Custom Styling
 # ---------------------------------------------------------
 st.set_page_config(
     page_title="Academic AI & XAI Performance Portal",
@@ -19,24 +17,99 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+def apply_custom_css():
+    st.markdown("""
+        <style>
+        .main-header {
+            background: linear-gradient(135deg, #1E3A5F 0%, #2C5282 100%);
+            padding: 1.5rem 2rem;
+            border-radius: 12px;
+            color: white;
+            margin-bottom: 1.5rem;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+        }
+        .main-header h1 {
+            margin: 0;
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: #FFFFFF;
+        }
+        .main-header p {
+            margin: 0.3rem 0 0 0;
+            font-size: 0.95rem;
+            color: #E2E8F0;
+        }
+        .metric-card {
+            background: #FFFFFF;
+            border: 1px solid #E2E8F0;
+            border-left: 5px solid #1E3A5F;
+            border-radius: 10px;
+            padding: 1rem 1.2rem;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.04);
+            margin-bottom: 0.8rem;
+        }
+        .metric-title {
+            font-size: 0.85rem;
+            color: #64748B;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        .metric-value {
+            font-size: 1.55rem;
+            font-weight: 700;
+            color: #0F172A;
+            margin: 0.2rem 0;
+        }
+        .metric-sub {
+            font-size: 0.82rem;
+            color: #475569;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+def render_header(title, subtitle):
+    st.markdown(f"""
+        <div class="main-header">
+            <h1>{title}</h1>
+            <p>{subtitle}</p>
+        </div>
+    """, unsafe_allow_html=True)
+
+def render_metric_card(title, value, subtitle=""):
+    st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-title">{title}</div>
+            <div class="metric-value">{value}</div>
+            <div class="metric-sub">{subtitle}</div>
+        </div>
+    """, unsafe_allow_html=True)
+
+def render_risk_banner(risk_code, risk_label):
+    if risk_code == 0:
+        st.success(f"🟢 **Academic Status: {risk_label}** — Student is performing safely above critical academic thresholds.")
+    elif risk_code == 1:
+        st.warning(f"🟡 **Academic Status: {risk_label}** — Moderate warning signs detected. Early habit and score adjustments recommended.")
+    else:
+        st.error(f"🔴 **Academic Status: {risk_label}** — High probability of academic difficulty or failure. Immediate counseling required.")
+
 apply_custom_css()
-init_db()
 
-# Course Catalog (University Curriculum Context)
-COURSE_LIST = [
-    "CSE-101: Structured Programming",
-    "CSE-203: Data Structures & Algorithms",
-    "CSE-305: Artificial Intelligence & Machine Learning",
-    "CSE-311: Database Management Systems",
-    "EEE-101: Electrical Circuits & Electronics",
-    "MAT-101: Differential & Integral Calculus",
-    "ENG-102: Academic Writing & Communication"
-]
+# ---------------------------------------------------------
+# 2. Built-in Authentication & SQLite Database Engine
+# ---------------------------------------------------------
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
 
-# Initialize History Table with Course Column
-def init_history_table():
+def init_db():
     conn = sqlite3.connect("users.db")
     c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            username TEXT PRIMARY KEY,
+            password TEXT NOT NULL,
+            role TEXT NOT NULL
+        )
+    """)
     c.execute("""
         CREATE TABLE IF NOT EXISTS prediction_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,15 +123,42 @@ def init_history_table():
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # Ensure 'course' column exists if upgrading from an older DB
+    # Upgrade schema safely if old table exists without 'course'
     c.execute("PRAGMA table_info(prediction_history)")
-    columns = [col[1] for col in c.fetchall()]
-    if "course" not in columns:
+    cols = [col[1] for col in c.fetchall()]
+    if "course" not in cols:
         c.execute("ALTER TABLE prediction_history ADD COLUMN course TEXT DEFAULT 'General Semester Evaluation'")
+
+    # Seed default demo accounts if not present
+    c.execute("INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)",
+              ("teacher", hash_password("password123"), "Teacher"))
+    c.execute("INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)",
+              ("student", hash_password("password123"), "Student"))
     conn.commit()
     conn.close()
 
-init_history_table()
+def register_user(username, password, role):
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+                  (username, hash_password(password), role))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+    finally:
+        conn.close()
+
+def login_user(username, password):
+    conn = sqlite3.connect("users.db")
+    c = conn.cursor()
+    c.execute("SELECT password, role FROM users WHERE username = ?", (username,))
+    row = c.fetchone()
+    conn.close()
+    if row and row[0] == hash_password(password):
+        return True, row[1]
+    return False, None
 
 def save_prediction_record(username, student_name, course, attendance, prev_cgpa, pred_cgpa, risk_label):
     conn = sqlite3.connect("users.db")
@@ -70,8 +170,21 @@ def save_prediction_record(username, student_name, course, attendance, prev_cgpa
     conn.commit()
     conn.close()
 
+init_db()
+
+# Course Catalog
+COURSE_LIST = [
+    "CSE-101: Structured Programming",
+    "CSE-203: Data Structures & Algorithms",
+    "CSE-305: Artificial Intelligence & Machine Learning",
+    "CSE-311: Database Management Systems",
+    "EEE-101: Electrical Circuits & Electronics",
+    "MAT-101: Differential & Integral Calculus",
+    "ENG-102: Academic Writing & Communication"
+]
+
 # ---------------------------------------------------------
-# 2. Load Models, Scaler, Dataset & Metrics
+# 3. Load Models, Scaler, Dataset & Metrics
 # ---------------------------------------------------------
 @st.cache_resource
 def load_artifacts():
@@ -86,11 +199,11 @@ def load_artifacts():
 try:
     cgpa_model, risk_model, scaler, model_metrics, dataset_df = load_artifacts()
 except Exception as e:
-    st.error(f"Error loading model artifacts: {e}. Please run `python train_model.py` first.")
+    st.error(f"Error loading model files: {e}. Ensure `.pkl` and `student_data.csv` exist in the repository.")
     st.stop()
 
 # ---------------------------------------------------------
-# 3. Prediction & Explainable AI (XAI) Engine
+# 4. Prediction & Explainable AI (XAI) Engine
 # ---------------------------------------------------------
 FEATURE_COLS = [
     "attendance", "prev_cgpa", "study_hours", "social_media_hours",
@@ -117,7 +230,7 @@ def predict_and_explain(attendance, prev_cgpa, study_hours, social_media_hours, 
     risk_code = int(risk_model.predict(scaled_input)[0])
     risk_probs = risk_model.predict_proba(scaled_input)[0]
 
-    # Override safeguard for extreme critical academic thresholds
+    # Safeguard thresholds
     if pred_cgpa < 2.75 or attendance < 60.0:
         risk_code = 2
     elif (pred_cgpa < 3.25 or attendance < 75.0) and risk_code == 0:
@@ -126,7 +239,6 @@ def predict_and_explain(attendance, prev_cgpa, study_hours, social_media_hours, 
     risk_map = {0: "Safe", 1: "Moderate Risk", 2: "High Risk"}
     risk_label = risk_map[risk_code]
 
-    # Local XAI Feature Contribution Calculation (Sensitivity Perturbation)
     baseline_vals = {
         "attendance": 78.0,
         "prev_cgpa": 3.15,
@@ -157,21 +269,21 @@ def predict_and_explain(attendance, prev_cgpa, study_hours, social_media_hours, 
 def generate_counseling_plan(attendance, study_hours, social_media_hours, quiz_avg, mid_score, pred_cgpa, course):
     advice = []
     if attendance < 75.0:
-        advice.append(f"🚨 **Attendance Recovery ({course}):** Your attendance is `{attendance}%`, which is below the 75% university benchmark. Attend the next 10 consecutive lectures to avoid exam debarment.")
+        advice.append(f"🚨 **Attendance Recovery ({course}):** Attendance is `{attendance}%` (below 75%). Attend all upcoming lectures to stay eligible for finals.")
     if study_hours < 3.0:
-        advice.append(f"📖 **Structured Self-Study:** Increase daily study time from `{study_hours} hrs` to at least `3.5–4.0 hrs` focusing on {course} problem sets.")
+        advice.append(f"📖 **Structured Study Plan:** Increase daily study time from `{study_hours} hrs` to `3.5–4.0 hrs` focusing on {course} problem sets.")
     if social_media_hours > 3.5:
-        advice.append(f"📵 **Digital Distraction Control:** Reduce social media usage from `{social_media_hours} hrs/day` to under `2.0 hrs/day` using Pomodoro focus blocks.")
+        advice.append(f"📵 **Digital Distraction Control:** Cut social media usage from `{social_media_hours} hrs/day` to under `2.0 hrs/day`.")
     if quiz_avg < 9.0:
-        advice.append(f"✍️ **Class Test (CT) Improvement:** Your CT average (`{quiz_avg}/15`) needs attention. Review weekly lecture slides before every quiz.")
+        advice.append(f"✍️ **Class Test (CT) Improvement:** Current CT average (`{quiz_avg}/15`) is low. Revise weekly lecture notes before quizzes.")
     if mid_score < 14.0:
-        advice.append(f"🎯 **Midterm Recovery Strategy:** With a Midterm score of `{mid_score}/25`, schedule office hours with your {course} instructor to cover weak topics before finals.")
+        advice.append(f"🎯 **Midterm Recovery:** Midterm score (`{mid_score}/25`) needs improvement. Consult your {course} faculty during office hours.")
     if not advice:
-        advice.append(f"🌟 **Strong Academic Trajectory in {course}:** Maintain your current study habits and aim for peer-mentoring or research projects to sustain a `{pred_cgpa:.2f}` CGPA.")
+        advice.append(f"🌟 **Excellent Trajectory in {course}:** Keep up your consistent effort to achieve your forecasted `{pred_cgpa:.2f}` CGPA.")
     return advice
 
 # ---------------------------------------------------------
-# 4. Session State & Authentication Portal (No Auto-Login)
+# 5. Session State & Authentication Portal (Manual Login)
 # ---------------------------------------------------------
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
@@ -222,15 +334,15 @@ if not st.session_state["logged_in"]:
                     else:
                         st.error("Username already exists. Please choose a different username.")
 
-        with st.expander("ℹ️ Quick Demo Credentials"):
+        with st.expander("ℹ️ Demo Login Credentials"):
             st.markdown("""
-            - **Teacher Account:** Username: `teacher` | Password: `password123` (or register a new Teacher account)
-            - **Student Account:** Register a new Student account and log in via the Login tab.
+            - **Teacher Demo:** Username: `teacher` | Password: `password123`
+            - **Student Demo:** Username: `student` | Password: `password123`
             """)
     st.stop()
 
 # ---------------------------------------------------------
-# 5. Sidebar Navigation (Logged-In State)
+# 6. Sidebar Navigation
 # ---------------------------------------------------------
 with st.sidebar:
     st.markdown(f"### 👤 {st.session_state['username']}")
@@ -267,7 +379,7 @@ with st.sidebar:
         st.rerun()
 
 # ---------------------------------------------------------
-# 6. STUDENT PORTAL VIEWS
+# 7. STUDENT PORTAL VIEWS
 # ---------------------------------------------------------
 if st.session_state["role"] == "Student":
     if menu == "🎯 Course Performance & XAI":
@@ -276,27 +388,26 @@ if st.session_state["role"] == "Student":
             "Select your course and enter academic metrics to forecast CGPA and understand key drivers."
         )
 
-        with st.container():
-            col_c1, col_c2 = st.columns([1.5, 1])
-            with col_c1:
-                selected_course = st.selectbox("📚 Select Course", COURSE_LIST)
-            with col_c2:
-                student_display_name = st.text_input("Student Name / ID", value=st.session_state["username"])
+        col_c1, col_c2 = st.columns([1.5, 1])
+        with col_c1:
+            selected_course = st.selectbox("📚 Select Course", COURSE_LIST)
+        with col_c2:
+            student_display_name = st.text_input("Student Name / ID", value=st.session_state["username"])
 
-            c1, c2, c3, c4 = st.columns(4)
-            with c1:
-                attendance = st.slider("Attendance (%)", 45.0, 100.0, 80.0, 0.5)
-                prev_cgpa = st.number_input("Previous CGPA (4.00)", 2.00, 4.00, 3.20, 0.01)
-            with c2:
-                study_hours = st.slider("Daily Study Hours", 0.5, 8.5, 3.5, 0.1)
-                social_media = st.slider("Social Media (hrs/day)", 0.5, 7.0, 2.5, 0.1)
-            with c3:
-                quiz_avg = st.slider("Class Test / Quiz Avg (/15)", 2.0, 15.0, 10.5, 0.5)
-                mid_score = st.slider("Midterm Score (/25)", 4.0, 25.0, 17.0, 0.5)
-            with c4:
-                tuition_opt = st.selectbox("Extra Coaching / Tuition", ["No", "Yes"])
-                tuition_val = 1 if tuition_opt == "Yes" else 0
-                teacher_rating = st.slider("Class Engagement Rating (1-5)", 1, 5, 4)
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            attendance = st.slider("Attendance (%)", 45.0, 100.0, 80.0, 0.5)
+            prev_cgpa = st.number_input("Previous CGPA (4.00)", 2.00, 4.00, 3.20, 0.01)
+        with c2:
+            study_hours = st.slider("Daily Study Hours", 0.5, 8.5, 3.5, 0.1)
+            social_media = st.slider("Social Media (hrs/day)", 0.5, 7.0, 2.5, 0.1)
+        with c3:
+            quiz_avg = st.slider("Class Test / Quiz Avg (/15)", 2.0, 15.0, 10.5, 0.5)
+            mid_score = st.slider("Midterm Score (/25)", 4.0, 25.0, 17.0, 0.5)
+        with c4:
+            tuition_opt = st.selectbox("Extra Coaching / Tuition", ["No", "Yes"])
+            tuition_val = 1 if tuition_opt == "Yes" else 0
+            teacher_rating = st.slider("Class Engagement Rating (1-5)", 1, 5, 4)
 
         if st.button("🔍 Predict Performance & Generate XAI Report", type="primary", use_container_width=True):
             pred_cgpa, risk_code, risk_label, risk_probs, contributions, study_balance = predict_and_explain(
@@ -342,7 +453,7 @@ if st.session_state["role"] == "Student":
     elif menu == "🎛️ 'What-If' Habit Simulator":
         render_header(
             "🎛️ Interactive 'What-If' Habit & Score Simulator",
-            "Simulate how improving your attendance, study hours, or exam scores changes your expected CGPA in a course."
+            "Simulate how improving your attendance, study hours, or exam scores changes your expected CGPA."
         )
         sim_course = st.selectbox("📚 Select Course to Simulate", COURSE_LIST)
 
@@ -401,7 +512,7 @@ if st.session_state["role"] == "Student":
         """)
 
 # ---------------------------------------------------------
-# 7. TEACHER / ADMIN PORTAL VIEWS
+# 8. TEACHER / ADMIN PORTAL VIEWS
 # ---------------------------------------------------------
 else:
     if menu == "🧑‍🏫 Single Student & Course Evaluation":
