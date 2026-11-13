@@ -1,0 +1,44 @@
+{
+    "Random Forest": {
+        "Accuracy": 97.5,
+        "F1_Score": 97.5,
+        "Confusion_Matrix": [
+            [
+                155,
+                2
+            ],
+            [
+                2,
+                1
+            ]
+        ]
+    },
+    "XGBoost": {
+        "Accuracy": 99.38,
+        "F1_Score": 99.31,
+        "Confusion_Matrix": [
+            [
+                157,
+                0
+            ],
+            [
+                1,
+                2
+            ]
+        ]
+    },
+    "SVM (RBF Kernel)": {
+        "Accuracy": 98.75,
+        "F1_Score": 98.44,
+        "Confusion_Matrix": [
+            [
+                157,
+                0
+            ],
+            [
+                2,
+                1
+            ]
+        ]
+    }
+}
