@@ -115,7 +115,7 @@ def get_gsheet_client():
     )
     return gspread.authorize(creds)
 
- def get_worksheets():
+def get_worksheets():
     client = get_gsheet_client()
     sh = client.open_by_key(SHEET_ID)
     users_ws = sh.worksheet("users")
