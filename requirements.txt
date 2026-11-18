@@ -6,3 +6,5 @@ xgboost
 plotly
 joblib
 openpyxl
+gspread
+google-auth

@@ -3,8 +3,10 @@ import pandas as pd
 import numpy as np
 import joblib
 import json
-import sqlite3
 import hashlib
+from datetime import datetime
+import gspread
+from google.oauth2.service_account import Credentials
 import plotly.express as px
 
 # ---------------------------------------------------------
@@ -95,77 +97,83 @@ def render_risk_banner(risk_code, risk_label):
 apply_custom_css()
 
 # ---------------------------------------------------------
-# 2. Clean SQLite Database Engine (portal_v2.db)
+# 2. Google Sheets Persistent Database Engine
 # ---------------------------------------------------------
-DB_FILE = "portal_v2.db"
+SHEET_NAME = "Student_XAI_Database"
 
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            username TEXT PRIMARY KEY,
-            password TEXT NOT NULL,
-            role TEXT NOT NULL
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS prediction_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT,
-            student_name TEXT,
-            course TEXT,
-            attendance REAL,
-            prev_cgpa REAL,
-            predicted_cgpa REAL,
-            risk_level TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    c.execute("INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)",
-              ("teacher", hash_password("password123"), "Teacher"))
-    c.execute("INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)",
-              ("student", hash_password("password123"), "Student"))
-    conn.commit()
-    conn.close()
+@st.cache_resource
+def get_gsheet_client():
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    creds = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"], scopes=scopes
+    )
+    return gspread.authorize(creds)
+
+def get_worksheets():
+    client = get_gsheet_client()
+    sh = client.open(SHEET_NAME)
+    users_ws = sh.worksheet("users")
+    history_ws = sh.worksheet("history")
+    return users_ws, history_ws
+
+def init_gsheet_db():
+    try:
+        users_ws, _ = get_worksheets()
+        existing_users = users_ws.col_values(1)
+        if "teacher" not in existing_users:
+            users_ws.append_row(["teacher", hash_password("password123"), "Teacher"])
+        if "student" not in existing_users:
+            users_ws.append_row(["student", hash_password("password123"), "Student"])
+    except Exception as e:
+        st.error(f"Google Sheets Connection Error: {e}")
+        st.info("Check that Streamlit Secrets are configured and the Google Sheet is shared as Editor with the Service Account email.")
+        st.stop()
 
 def register_user(username, password, role):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    try:
-        c.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
-                  (username, hash_password(password), role))
-        conn.commit()
-        return True
-    except sqlite3.IntegrityError:
+    users_ws, _ = get_worksheets()
+    existing_users = [str(u).strip() for u in users_ws.col_values(1)]
+    if username in existing_users:
         return False
-    finally:
-        conn.close()
+    users_ws.append_row([username, hash_password(password), role])
+    return True
 
 def login_user(username, password):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT password, role FROM users WHERE username = ?", (username,))
-    row = c.fetchone()
-    conn.close()
-    if row and row[0] == hash_password(password):
-        return True, row[1]
+    users_ws, _ = get_worksheets()
+    records = users_ws.get_all_records()
+    hashed_pw = hash_password(password)
+    for row in records:
+        if str(row.get("username", "")).strip() == username and str(row.get("password", "")).strip() == hashed_pw:
+            return True, str(row.get("role", "Student")).strip()
     return False, None
 
 def save_prediction_record(username, student_name, course, attendance, prev_cgpa, pred_cgpa, risk_label):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("""
-        INSERT INTO prediction_history (username, student_name, course, attendance, prev_cgpa, predicted_cgpa, risk_level)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (username, student_name, course, attendance, prev_cgpa, pred_cgpa, risk_label))
-    conn.commit()
-    conn.close()
+    _, history_ws = get_worksheets()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    history_ws.append_row([
+        username,
+        student_name,
+        course,
+        float(attendance),
+        float(prev_cgpa),
+        round(float(pred_cgpa), 2),
+        risk_label,
+        now_str
+    ])
 
-init_db()
+def load_history_df():
+    _, history_ws = get_worksheets()
+    records = history_ws.get_all_records()
+    if not records:
+        return pd.DataFrame(columns=["username", "student_name", "course", "attendance", "prev_cgpa", "predicted_cgpa", "risk_level", "timestamp"])
+    return pd.DataFrame(records)
+
+init_gsheet_db()
 
 # Course Catalog
 COURSE_LIST = [
@@ -302,7 +310,8 @@ if not st.session_state["logged_in"]:
             login_pass_input = st.text_input("Password", type="password", key="login_password", placeholder="Enter your password")
             if st.button("Login", use_container_width=True, type="primary"):
                 if login_user_input and login_pass_input:
-                    success, role = login_user(login_user_input.strip(), login_pass_input)
+                    with st.spinner("Verifying credentials..."):
+                        success, role = login_user(login_user_input.strip(), login_pass_input)
                     if success:
                         st.session_state["logged_in"] = True
                         st.session_state["username"] = login_user_input.strip()
@@ -322,9 +331,10 @@ if not st.session_state["logged_in"]:
                 if len(reg_user_input.strip()) < 3 or len(reg_pass_input) < 4:
                     st.warning("Username must be at least 3 characters and password at least 4 characters.")
                 else:
-                    created = register_user(reg_user_input.strip(), reg_pass_input, reg_role_input)
+                    with st.spinner("Saving account to cloud database..."):
+                        created = register_user(reg_user_input.strip(), reg_pass_input, reg_role_input)
                     if created:
-                        st.success("✅ Account created successfully! Please switch to the **'🔐 Login to Portal'** tab above to sign in.")
+                        st.success("✅ Account created and saved permanently! Switch to the **'🔐 Login to Portal'** tab to sign in.")
                     else:
                         st.error("Username already exists. Please choose a different username.")
 
@@ -483,17 +493,17 @@ if st.session_state["role"] == "Student":
             render_metric_card("Projected Risk Status", new_risk, f"Was: {base_risk}")
 
     elif menu == "📜 My Evaluation History":
-        render_header("📜 My Course Evaluation History", "Review your past predictions across different courses.")
-        conn = sqlite3.connect(DB_FILE)
-        hist_df = pd.read_sql_query(
-            "SELECT student_name, course, attendance, prev_cgpa, predicted_cgpa, risk_level, timestamp FROM prediction_history WHERE username = ? ORDER BY id DESC",
-            conn, params=(st.session_state["username"],)
-        )
-        conn.close()
-        if hist_df.empty:
+        render_header("📜 My Course Evaluation History", "Review your permanently saved predictions across different courses.")
+        all_hist = load_history_df()
+        if not all_hist.empty and "username" in all_hist.columns:
+            user_hist = all_hist[all_hist["username"].astype(str) == st.session_state["username"]]
+        else:
+            user_hist = pd.DataFrame()
+
+        if user_hist.empty:
             st.info("No evaluations saved yet. Go to 'Course Performance & XAI' to run your first prediction.")
         else:
-            st.dataframe(hist_df, use_container_width=True)
+            st.dataframe(user_hist.iloc[::-1], use_container_width=True)
 
     elif menu == "🎓 5-Pillar Thesis Overview":
         render_header("🎓 Academic Thesis Architecture (5 Pillars)", "Methodology, Dataset, Preprocessing, Modeling & XAI Contribution")
@@ -625,11 +635,12 @@ else:
             st.json(model_metrics)
 
     elif menu == "📜 All Student Records":
-        render_header("📜 Saved Course Evaluation Records", "All evaluations logged across students and courses.")
-        conn = sqlite3.connect(DB_FILE)
-        all_df = pd.read_sql_query("SELECT * FROM prediction_history ORDER BY id DESC", conn)
-        conn.close()
-        st.dataframe(all_df, use_container_width=True)
+        render_header("📜 Saved Course Evaluation Records", "All evaluations permanently logged in Google Sheets.")
+        all_df = load_history_df()
+        if all_df.empty:
+            st.info("No evaluations recorded yet.")
+        else:
+            st.dataframe(all_df.iloc[::-1], use_container_width=True)
 
     elif menu == "🎓 5-Pillar Thesis Overview":
         render_header("🎓 Academic Thesis Architecture (5 Pillars)", "End-to-end system methodology for defense presentation.")
