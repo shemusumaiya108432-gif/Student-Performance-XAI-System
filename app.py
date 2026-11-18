@@ -99,7 +99,7 @@ apply_custom_css()
 # ---------------------------------------------------------
 # 2. Google Sheets Persistent Database Engine
 # ---------------------------------------------------------
-SHEET_NAME = "Student_XAI_Database"
+SHEET_ID = "1nFshtS81ABik4ub6c8LN10DeSUvZ_7qZonoSOrPaKaQ"
 
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
@@ -115,9 +115,9 @@ def get_gsheet_client():
     )
     return gspread.authorize(creds)
 
-def get_worksheets():
+ def get_worksheets():
     client = get_gsheet_client()
-    sh = client.open(SHEET_NAME)
+    sh = client.open_by_key(SHEET_ID)
     users_ws = sh.worksheet("users")
     history_ws = sh.worksheet("history")
     return users_ws, history_ws
